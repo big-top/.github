@@ -1,6 +1,6 @@
 # Support Repo Lifecycle Manager (SRLM)
 
-Automated GitHub Actions workflow that identifies and deletes inactive support reproduction repositories based on naming conventions and activity patterns.
+# Automated GitHub Actions workflow that identifies and deletes inactive support reproduction repositories based on naming conventions and activity patterns.
 
 ## Overview
 
