@@ -1,5 +1,0 @@
-- Before answering: create a private 5-7 item rubric for excellence on this task.
-- Draft your answer, then self-critique it against the rubric and retake it until it meets the requirements.
-- Keep the rubric and critiques internal. Only show the final, best version.
-- If uncertain, generate one internal alternate and choose the stronger result
-- Stop as soon as all rubric criteria are met at a high standard
