@@ -4,6 +4,7 @@ on:
   schedule:
     # Run daily at 00:00 UTC
     - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   cleanup-repos:
@@ -20,13 +21,17 @@ jobs:
           script: |
             const INACTIVITY_THRESHOLD_DAYS = 14;
             const REPO_NAME_PATTERN = /^\d{7}/;
-            const org = '${{ vars.SRLM_ORG }}';
+            const isManualRun = '${{ github.event_name }}' === 'workflow_dispatch';
             
             // Calculate cutoff date (14 days ago from now)
             const cutoffDate = new Date();
             cutoffDate.setDate(cutoffDate.getDate() - INACTIVITY_THRESHOLD_DAYS);
             
             console.log(`🔍 Scanning organization: ${org}`);
+            console.log(`🚀 Run type: ${isManualRun ? 'MANUAL (delete all matching repos)' : 'SCHEDULED (check activity)'}`);
+            if (!isManualRun) {
+              console.log(`📅 Cutoff date: ${cutoffDate.toISOString()}`);
+            }
             console.log(`📅 Cutoff date: ${cutoffDate.toISOString()}`);
             console.log(`🎯 Target pattern: Repository names starting with 7 digits`);
             console.log('─'.repeat(80));
@@ -48,97 +53,106 @@ jobs:
             let deletedCount = 0;
             let skippedCount = 0;
             
-            for (const repo of targetRepos) {
-              console.log(`\n🔎 Checking: ${repo.name}`);
-              
-              try {
-                // Check for recent commits
-                let hasRecentActivity = false;
+            for let shouldDelete = false;
                 let lastActivityDate = null;
                 let activityType = null;
                 
-                // 1. Check commits
-                try {
-                  const commits = await github.rest.repos.listCommits({
-                    owner: org,
-                    repo: repo.name,
-                    since: cutoffDate.toISOString(),
-                    per_page: 1
-                  });
+                if (isManualRun) {
+                  // Manual run: delete all matching repos without checking activity
+                  console.log(`  🔥 MANUAL RUN - Deleting without activity check`);
+                  shouldDelete = true;
+                  lastActivityDate = repo.pushed_at || repo.updated_at || 'N/A';
+                } else {
+                  // Scheduled run: check for activity
+                  let hasRecentActivity = false;
                   
-                  if (commits.data.length > 0) {
-                    hasRecentActivity = true;
-                    lastActivityDate = commits.data[0].commit.committer.date;
-                    activityType = 'commit';
-                  }
-                } catch (error) {
-                  // Empty repo or no commits - continue checking other activity
-                  console.log(`  ℹ️  No commits found (may be empty repo)`);
-                }
-                
-                // 2. Check issues (comments, labels, state changes)
-                if (!hasRecentActivity) {
+                  // 1. Check commits
                   try {
-                    const issues = await github.rest.issues.listForRepo({
+                    const commits = await github.rest.repos.listCommits({
                       owner: org,
                       repo: repo.name,
-                      state: 'all',
                       since: cutoffDate.toISOString(),
                       per_page: 1
                     });
                     
-                    if (issues.data.length > 0) {
+                    if (commits.data.length > 0) {
                       hasRecentActivity = true;
-                      lastActivityDate = issues.data[0].updated_at;
-                      activityType = 'issue';
+                      lastActivityDate = commits.data[0].commit.committer.date;
+                      activityType = 'commit';
                     }
                   } catch (error) {
-                    console.log(`  ℹ️  Could not check issues: ${error.message}`);
+                    // Empty repo or no commits - continue checking other activity
+                    console.log(`  ℹ️  No commits found (may be empty repo)`);
+                  }
+                  
+                  // 2. Check issues (comments, labels, state changes)
+                  if (!hasRecentActivity) {
+                    try {
+                      const issues = await github.rest.issues.listForRepo({
+                        owner: org,
+                        repo: repo.name,
+                        state: 'all',
+                        since: cutoffDate.toISOString(),
+                        per_page: 1
+                      });
+                      
+                      if (issues.data.length > 0) {
+                        hasRecentActivity = true;
+                        lastActivityDate = issues.data[0].updated_at;
+                        activityType = 'issue';
+                      }
+                    } catch (error) {
+                      console.log(`  ℹ️  Could not check issues: ${error.message}`);
+                    }
+                  }
+                  
+                  // 3. Check pull requests
+                  if (!hasRecentActivity) {
+                    try {
+                      const pulls = await github.rest.pulls.list({
+                        owner: org,
+                        repo: repo.name,
+                        state: 'all',
+                        sort: 'updated',
+                        direction: 'desc',
+                        per_page: 100
+                      });
+                      
+                      // Check if any PR was updated after cutoff
+                      const recentPRs = pulls.data.filter(pr => {
+                        const updatedAt = new Date(pr.updated_at);
+                        return updatedAt > cutoffDate;
+                      });
+                      
+                      if (recentPRs.length > 0) {
+                        hasRecentActivity = true;
+                        lastActivityDate = recentPRs[0].updated_at;
+                        activityType = 'pull request';
+                      }
+                    } catch (error) {
+                      console.log(`  ℹ️  Could not check pull requests: ${error.message}`);
+                    }
+                  }
+                  
+                  // Determine last activity from repo metadata if no specific activity found
+                  if (!lastActivityDate) {
+                    lastActivityDate = repo.pushed_at || repo.updated_at;
+                  }
+                  
+                  const daysSinceActivity = Math.floor(
+                    (new Date() - new Date(lastActivityDate)) / (1000 * 60 * 60 * 24)
+                  );
+                  
+                  if (hasRecentActivity) {
+                    console.log(`  ✅ ACTIVE - Last ${activityType}: ${lastActivityDate} (${daysSinceActivity} days ago)`);
+                    shouldDelete = false;
+                  } else {
+                    console.log(`  ❌ INACTIVE - Last activity: ${lastActivityDate} (${daysSinceActivity} days ago)`);
+                    shouldDelete = true;
                   }
                 }
                 
-                // 3. Check pull requests
-                if (!hasRecentActivity) {
-                  try {
-                    const pulls = await github.rest.pulls.list({
-                      owner: org,
-                      repo: repo.name,
-                      state: 'all',
-                      sort: 'updated',
-                      direction: 'desc',
-                      per_page: 100
-                    });
-                    
-                    // Check if any PR was updated after cutoff
-                    const recentPRs = pulls.data.filter(pr => {
-                      const updatedAt = new Date(pr.updated_at);
-                      return updatedAt > cutoffDate;
-                    });
-                    
-                    if (recentPRs.length > 0) {
-                      hasRecentActivity = true;
-                      lastActivityDate = recentPRs[0].updated_at;
-                      activityType = 'pull request';
-                    }
-                  } catch (error) {
-                    console.log(`  ℹ️  Could not check pull requests: ${error.message}`);
-                  }
-                }
-                
-                // Determine last activity from repo metadata if no specific activity found
-                if (!lastActivityDate) {
-                  lastActivityDate = repo.pushed_at || repo.updated_at;
-                }
-                
-                const daysSinceActivity = Math.floor(
-                  (new Date() - new Date(lastActivityDate)) / (1000 * 60 * 60 * 24)
-                );
-                
-                if (hasRecentActivity) {
-                  console.log(`  ✅ ACTIVE - Last ${activityType}: ${lastActivityDate} (${daysSinceActivity} days ago)`);
-                  skippedCount++;
-                } else {
-                  console.log(`  ❌ INACTIVE - Last activity: ${lastActivityDate} (${daysSinceActivity} days ago)`);
+                if (shouldDelete) {
                   console.log(`  🗑️  Deleting repository...`);
                   
                   await github.rest.repos.delete({
@@ -148,19 +162,31 @@ jobs:
                   
                   console.log(`  ✓ Deleted successfully`);
                   deletedCount++;
+                } else {
+                  skippo: repo.name
+                  });
+                  
+                  console.log(`  ✓ Deleted successfully`);
+                  deletedCount++;
                 }
                 
-              } catch (error) {
-                console.error(`  ⚠️  Error processing ${repo.name}: ${error.message}`);
-                skippedCount++;
-              }
+            const summaryTable = [
+              [{data: 'Metric', header: true}, {data: 'Count', header: true}],
+              ['Run Type', isManualRun ? 'Manual' : 'Scheduled'],
+              ['Organization', org],
+              ['Total Repositories Scanned', repos.length.toString()],
+              ['Matching Name Pattern', targetRepos.length.toString()],
+              ['Active (Preserved)', skippedCount.toString()],
+              ['Inactive (Deleted)', deletedCount.toString()]
+            ];
+            
+            if (!isManualRun) {
+              summaryTable.push(['Inactivity Threshold', `${INACTIVITY_THRESHOLD_DAYS} days`]);
             }
             
-            console.log('\n' + '═'.repeat(80));
-            console.log('📊 SUMMARY');
-            console.log('═'.repeat(80));
-            console.log(`✅ Active repositories: ${skippedCount}`);
-            console.log(`🗑️  Deleted repositories: ${deletedCount}`);
+            await core.summary
+              .addHeading('Support Repo Lifecycle Manager - Cleanup Report')
+              .addTable(summaryTablesole.log(`🗑️  Deleted repositories: ${deletedCount}`);
             console.log(`📦 Total checked: ${targetRepos.length}`);
             console.log('═'.repeat(80));
             
